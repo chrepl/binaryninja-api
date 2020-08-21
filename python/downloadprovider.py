@@ -41,12 +41,14 @@ from binaryninja import range
 class DownloadInstance(object):
 	_registered_instances = []
 	_response = b""
+	_data = b""
 	def __init__(self, provider, handle = None):
 		if handle is None:
 			self._cb = core.BNDownloadInstanceCallbacks()
 			self._cb.context = 0
 			self._cb.destroyInstance = self._cb.destroyInstance.__class__(self._destroy_instance)
 			self._cb.performRequest = self._cb.performRequest.__class__(self._perform_request)
+			self._cb.performCustomRequest = self._cb.performCustomRequest.__class__(self._perform_custom_request)
 			self.handle = core.BNInitDownloadInstance(provider.handle, self._cb)
 			self.__class__._registered_instances.append(self)
 		else:
@@ -72,13 +74,58 @@ class DownloadInstance(object):
 			log.log_error(traceback.format_exc())
 			return -1
 
+	def _perform_custom_request(self, ctxt, method, url, header_count, header_keys, header_values):
+		try:
+			# Extract headers
+			keys_ptr = ctypes.cast(header_keys, ctypes.POINTER(ctypes.c_char_p))
+			values_ptr = ctypes.cast(header_values, ctypes.POINTER(ctypes.c_char_p))
+			header_key_array = (ctypes.c_char_p * header_count).from_address(ctypes.addressof(keys_ptr.contents))
+			header_value_array = (ctypes.c_char_p * header_count).from_address(ctypes.addressof(values_ptr.contents))
+			headers = {}
+			for i in range(header_count):
+				headers[header_key_array[i]] = header_value_array[i]
+
+			# Read all data
+			data = b''
+			while True:
+				read_buffer = ctypes.create_string_buffer(0x1000)
+				read_len = core.BNReadDataForDownloadInstance(self.handle, ctypes.cast(read_buffer, ctypes.POINTER(ctypes.c_uint8)), 0x1000)
+				if read_len == 0:
+					break
+				data += read_buffer[:read_len]
+
+			return self.perform_custom_request(method, url, headers, data)
+		except:
+			log.log_error(traceback.format_exc())
+			return -1
+
 	@abc.abstractmethod
 	def perform_destroy_instance(self):
 		raise NotImplementedError
 
 	@abc.abstractmethod
-	def perform_request(self, ctxt, url):
+	def perform_request(self, url):
 		raise NotImplementedError
+
+	@abc.abstractmethod
+	def perform_custom_request(self, method, url, headers, data):
+		raise NotImplementedError
+
+	def _read_callback(self, data, len_, ctxt):
+		try:
+			bytes_len = len_
+			if bytes_len > len(self._data):
+				bytes_len = len(self._data)
+
+			c = ctypes.cast(data, ctypes.POINTER(ctypes.c_char))
+			writeable_data = (ctypes.c_char * len_).from_address(ctypes.addressof(c.contents))
+			writeable_data[:bytes_len] = self._data[:bytes_len]
+			self._data = self._data[bytes_len:]
+
+			return bytes_len
+		except:
+			log.log_error(traceback.format_exc())
+			return 0
 
 	def _write_callback(self, data, len, ctxt):
 		try:
@@ -87,6 +134,7 @@ class DownloadInstance(object):
 			return len
 		except:
 			log.log_error(traceback.format_exc())
+			return 0
 
 	def get_response(self, url):
 		callbacks = core.BNDownloadInstanceOutputCallbacks()
@@ -96,6 +144,42 @@ class DownloadInstance(object):
 		self._response = b""
 		result = core.BNPerformDownloadRequest(self.handle, url, callbacks)
 		return (result, self._response)
+
+	def request(self, method, url, headers = {}, data = b''):
+		assert(type(data) == bytes)
+		self._data = data
+		if len(data) > 0:
+			headers["Content-Length"] = len(data)
+
+		callbacks = core.BNDownloadInstanceInputOutputCallbacks()
+		callbacks.readCallback = callbacks.readCallback.__class__(self._read_callback)
+		callbacks.writeCallback = callbacks.writeCallback.__class__(self._write_callback)
+		callbacks.readContext = 0
+		callbacks.writeContext = 0
+		callbacks.progressContext = 0
+		self._response = b""
+		header_keys = (ctypes.c_char_p * len(headers))()
+		header_values = (ctypes.c_char_p * len(headers))()
+		for (i, item) in enumerate(headers.items()):
+			def encode(field):
+				if type(field) == bytes:
+					return field
+				if type(field) == str:
+					return field.encode()
+				return str(field).encode()
+
+			key, value = item
+			header_keys[i] = encode(key)
+			header_values[i] = encode(value)
+
+		result = core.BNPerformCustomRequest(self.handle, method, url, len(headers), header_keys, header_values, callbacks)
+		return (result, self._response)
+
+	def get(self, url, headers = {}):
+		return self.request("GET", url, headers)
+
+	def post(self, url, headers = {}, data = b''):
+		return self.request("POST", url, headers, data)
 
 class _DownloadProviderMetaclass(type):
 	@property
@@ -253,6 +337,41 @@ try:
 
 			return 0
 
+		def perform_custom_request(self, method, url, headers, data):
+			try:
+				proxy_setting = Settings().get_string('downloadClient.httpsProxy')
+				if proxy_setting:
+					proxies = {"https": proxy_setting}
+				else:
+					proxies = None
+
+				r = requests.request(pyNativeStr(method), pyNativeStr(url), headers=headers, data=data, proxies=proxies)
+				if not r.ok:
+					core.BNSetErrorForDownloadInstance(self.handle, "Received error from server")
+					return -1
+				response = r.content
+				if len(response) == 0:
+					core.BNSetErrorForDownloadInstance(self.handle, "No data received from server!")
+					return -1
+				raw_bytes = (ctypes.c_ubyte * len(response)).from_buffer_copy(response)
+				bytes_wrote = core.BNWriteDataForDownloadInstance(self.handle, raw_bytes, len(raw_bytes))
+				if bytes_wrote != len(raw_bytes):
+					core.BNSetErrorForDownloadInstance(self.handle, "Bytes written mismatch!")
+					return -1
+				continue_download = core.BNNotifyProgressForDownloadInstance(self.handle, bytes_wrote, bytes_wrote)
+				if continue_download is False:
+					core.BNSetErrorForDownloadInstance(self.handle, "Download aborted!")
+					return -1
+			except requests.RequestException as e:
+				core.BNSetErrorForDownloadInstance(self.handle, e.__class__.__name__)
+				return -1
+			except:
+				core.BNSetErrorForDownloadInstance(self.handle, "Unknown Exception!")
+				log.log_error(traceback.format_exc())
+				return -1
+
+			return 0
+
 	class PythonDownloadProvider(DownloadProvider):
 		name = "PythonDownloadProvider"
 		instance_class = PythonDownloadInstance
@@ -265,10 +384,10 @@ except ImportError:
 if not _loaded and (sys.platform != "win32") and (sys.version_info >= (2, 7, 9)):
 	try:
 		try:
-			from urllib.request import urlopen, build_opener, install_opener, ProxyHandler
+			from urllib.request import urlopen, build_opener, install_opener, ProxyHandler, Request
 			from urllib.error import URLError
 		except ImportError:
-			from urllib2 import urlopen, build_opener, install_opener, ProxyHandler, URLError
+			from urllib2 import urlopen, build_opener, install_opener, ProxyHandler, URLError, Request
 
 		class PythonDownloadInstance(DownloadInstance):
 			def __init__(self, provider):
@@ -285,6 +404,71 @@ if not _loaded and (sys.platform != "win32") and (sys.version_info >= (2, 7, 9))
 						install_opener(opener)
 
 					r = urlopen(pyNativeStr(url))
+					total_size = int(r.headers.get('content-length', 0))
+					bytes_sent = 0
+					while True:
+						data = r.read(4096)
+						if not data:
+							break
+						raw_bytes = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
+						bytes_wrote = core.BNWriteDataForDownloadInstance(self.handle, raw_bytes, len(raw_bytes))
+						if bytes_wrote != len(raw_bytes):
+							core.BNSetErrorForDownloadInstance(self.handle, "Bytes written mismatch!")
+							return -1
+						bytes_sent = bytes_sent + bytes_wrote
+						continue_download = core.BNNotifyProgressForDownloadInstance(self.handle, bytes_sent, total_size)
+						if continue_download is False:
+							core.BNSetErrorForDownloadInstance(self.handle, "Download aborted!")
+							return -1
+
+					if not bytes_sent:
+						core.BNSetErrorForDownloadInstance(self.handle, "Received no data!")
+						return -1
+
+				except URLError as e:
+					core.BNSetErrorForDownloadInstance(self.handle, e.__class__.__name__)
+					log.log_error(str(e))
+					return -1
+				except:
+					core.BNSetErrorForDownloadInstance(self.handle, "Unknown Exception!")
+					log.log_error(traceback.format_exc())
+					return -1
+
+				return 0
+
+			class CustomRequest(Request):
+				"""
+				urllib2 (python2) does not have a parameter for custom request methods
+				So this is a shim class to deal with that
+				"""
+
+				def __init__(self, *args, **kwargs):
+					if "method" in kwargs:
+						self._method = kwargs["method"]
+						# Need to remove from kwargs or python2 will complain about the unused arg
+						del kwargs["method"]
+					else:
+						self._method = None
+
+					Request.__init__(self, *args, **kwargs)
+
+				def get_method(self, *args, **kwargs):
+					if self._method is not None:
+						return self._method
+					return Request.get_method(self, *args, **kwargs)
+
+			def perform_custom_request(self, method, url, headers, data):
+				try:
+					proxy_setting = Settings().get_string('downloadClient.httpsProxy')
+					if proxy_setting:
+						opener = build_opener(ProxyHandler({'https': proxy_setting}))
+						install_opener(opener)
+
+					if b"Content-Length" in headers:
+						del headers[b"Content-Length"]
+
+					req = PythonDownloadInstance.CustomRequest(pyNativeStr(url), data=data, headers=headers, method=pyNativeStr(method))
+					r = urlopen(req)
 					total_size = int(r.headers.get('content-length', 0))
 					bytes_sent = 0
 					while True:
