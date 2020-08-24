@@ -1198,6 +1198,13 @@ __attribute__ ((format (printf, 1, 2)))
 
 
 	class Tag;
+	struct DisassemblyTextLineTypeInfo
+	{
+		bool hasTypeInfo;
+		BinaryNinja::Ref<BinaryNinja::Type> parentType;
+		size_t fieldIndex;
+	};
+
 	struct DisassemblyTextLine
 	{
 		uint64_t addr;
@@ -1205,6 +1212,7 @@ __attribute__ ((format (printf, 1, 2)))
 		std::vector<InstructionTextToken> tokens;
 		BNHighlightColor highlight;
 		std::vector<Ref<Tag>> tags;
+		DisassemblyTextLineTypeInfo typeInfo;
 
 		DisassemblyTextLine();
 	};
@@ -2497,6 +2505,8 @@ __attribute__ ((format (printf, 1, 2)))
 		QualifiedName GetStructureName() const;
 		Ref<NamedTypeReference> GetRegisteredName() const;
 
+		BNIntegerDisplayType GetIntegerTypeDisplayType() const;
+
 		uint64_t GetElementCount() const;
 		uint64_t GetOffset() const;
 
@@ -2594,6 +2604,7 @@ __attribute__ ((format (printf, 1, 2)))
 		Confidence<bool> IsSigned() const;
 		Confidence<bool> IsConst() const;
 		Confidence<bool> IsVolatile() const;
+		void SetIntegerTypeDisplayType(BNIntegerDisplayType displayType);
 
 		Confidence<Ref<Type>> GetChildType() const;
 		Confidence<Ref<CallingConvention>> GetCallingConvention() const;
