@@ -43,6 +43,7 @@ public:
 	virtual int rowCount(const QModelIndex& parent) const override;
 	virtual int columnCount(const QModelIndex& parent) const override;
 	virtual QVariant data(const QModelIndex& i, int role) const override;
+	BinaryViewRef getData() const { return m_data; }
 
 	BNStringReference getStringAt(const QModelIndex& i);
 	QModelIndex findString(const BNStringReference& ref);
