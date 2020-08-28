@@ -21,8 +21,14 @@
 
 import abc
 import ctypes
+from json import loads, dumps
 import sys
 import traceback
+
+if sys.version_info >= (3, 0, 0):
+	from urllib.parse import urlencode
+else:
+	from urllib import urlencode
 
 # Binary Ninja Components
 import binaryninja._binaryninjacore as core
@@ -36,6 +42,14 @@ from binaryninja import log
 # 2-3 compatibility
 from binaryninja import pyNativeStr
 from binaryninja import range
+
+
+def to_bytes(field):
+	if type(field) == bytes:
+		return field
+	if type(field) == str:
+		return field.encode()
+	return str(field).encode()
 
 
 class DownloadInstance(object):
@@ -145,11 +159,30 @@ class DownloadInstance(object):
 		result = core.BNPerformDownloadRequest(self.handle, url, callbacks)
 		return (result, self._response)
 
-	def request(self, method, url, headers = {}, data = b''):
-		assert(type(data) == bytes)
+	def request(self, method, url, headers = None, data = None, json = None):
+		if headers is None:
+			headers = {}
+		if data is None and json is None:
+			data = b''
+		elif data is None and json is not None:
+			data = to_bytes(dumps(json))
+			if "Content-Type" not in headers:
+				headers["Content-Type"] = "application/json"
+		elif data is not None and json is None:
+			if type(data) == dict:
+				# Urlencode data as a form body
+				data = to_bytes(urlencode(data))
+				if "Content-Type" not in headers:
+					headers["Content-Type"] = "application/x-www-form-urlencoded"
+			else:
+				assert(type(data) == bytes)
+
 		self._data = data
-		if len(data) > 0:
+		print(self._data)
+		if len(data) > 0 and "Content-Length" not in headers:
 			headers["Content-Length"] = len(data)
+		if "Content-Type" not in headers:
+			headers["Content-Type"] = "application/octet-stream"
 
 		callbacks = core.BNDownloadInstanceInputOutputCallbacks()
 		callbacks.readCallback = callbacks.readCallback.__class__(self._read_callback)
@@ -161,25 +194,21 @@ class DownloadInstance(object):
 		header_keys = (ctypes.c_char_p * len(headers))()
 		header_values = (ctypes.c_char_p * len(headers))()
 		for (i, item) in enumerate(headers.items()):
-			def encode(field):
-				if type(field) == bytes:
-					return field
-				if type(field) == str:
-					return field.encode()
-				return str(field).encode()
-
 			key, value = item
-			header_keys[i] = encode(key)
-			header_values[i] = encode(value)
+			header_keys[i] = to_bytes(key)
+			header_values[i] = to_bytes(value)
 
 		result = core.BNPerformCustomRequest(self.handle, method, url, len(headers), header_keys, header_values, callbacks)
 		return (result, self._response)
 
-	def get(self, url, headers = {}):
+	def get(self, url, headers = None):
 		return self.request("GET", url, headers)
 
-	def post(self, url, headers = {}, data = b''):
-		return self.request("POST", url, headers, data)
+	def post(self, url, headers = None, data = None, json = None):
+		return self.request("POST", url, headers, data, json)
+
+	def put(self, url, headers = None, data = None, json = None):
+		return self.request("POST", url, headers, data, json)
 
 class _DownloadProviderMetaclass(type):
 	@property
