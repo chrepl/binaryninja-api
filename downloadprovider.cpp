@@ -41,7 +41,8 @@ int DownloadInstance::PerformCustomRequestCallback(void* ctxt, const char* metho
 {
 	DownloadInstance* instance = (DownloadInstance*)ctxt;
 	unordered_map<string, string> headers;
-	for (uint64_t i = 0; i < headerCount; i ++) {
+	for (uint64_t i = 0; i < headerCount; i ++)
+	{
 		headers[headerKeys[i]] = headerValues[i];
 	}
 
@@ -52,7 +53,8 @@ int DownloadInstance::PerformCustomRequestCallback(void* ctxt, const char* metho
 	char** values = new char*[apiResponse.headers.size()];
 
 	uint64_t i = 0;
-	for (const auto& pair : apiResponse.headers) {
+	for (const auto& pair : apiResponse.headers)
+	{
 		keys[i] = BNAllocString(pair.first.c_str());
 		values[i] = BNAllocString(pair.second.c_str());
 		i ++;
@@ -70,7 +72,8 @@ int DownloadInstance::PerformCustomRequestCallback(void* ctxt, const char* metho
 
 void DownloadInstance::PerformFreeResponse(void* ctxt, BNDownloadInstanceResponse* response)
 {
-	for (uint64_t i = 0; i < response->headerCount; i ++) {
+	for (uint64_t i = 0; i < response->headerCount; i ++)
+	{
 		BNFreeString(response->headerKeys[i]);
 		BNFreeString(response->headerValues[i]);
 	}
@@ -127,7 +130,8 @@ int DownloadInstance::PerformCustomRequest(const string& method, const string& u
 	const char** headerValues = new const char*[headers.size()];
 
 	uint64_t i = 0;
-	for (auto it = headers.begin(); it != headers.end(); ++it) {
+	for (auto it = headers.begin(); it != headers.end(); ++it)
+	{
 		headerKeys[i] = it->first.c_str();
 		headerValues[i] = it->second.c_str();
 		i ++;
@@ -138,7 +142,8 @@ int DownloadInstance::PerformCustomRequest(const string& method, const string& u
 	int result = BNPerformCustomRequest(m_object, method.c_str(), url.c_str(), headers.size(), headerKeys, headerValues, &bnResponse, callbacks);
 
 	response.statusCode = bnResponse->statusCode;
-	for (uint64_t i = 0; i < bnResponse->headerCount; i ++) {
+	for (uint64_t i = 0; i < bnResponse->headerCount; i ++)
+	{
 		response.headers[bnResponse->headerKeys[i]] = bnResponse->headerValues[i];
 	}
 

@@ -97,6 +97,9 @@ class DownloadInstance(object):
 			return -1
 
 	def _perform_custom_request(self, ctxt, method, url, header_count, header_keys, header_values, response):
+		# Cast response to an array of length 1 so ctypes can write to the pointer
+		# out_response = ((BNDownloadInstanceResponse*)[1])response
+		out_response = (ctypes.POINTER(core.BNDownloadInstanceResponse) * 1).from_address(ctypes.addressof(response.contents))
 		try:
 			# Extract headers
 			keys_ptr = ctypes.cast(header_keys, ctypes.POINTER(ctypes.c_char_p))
@@ -117,22 +120,28 @@ class DownloadInstance(object):
 				data += read_buffer[:read_len]
 
 			py_response = self.perform_custom_request(method, url, headers, data)
-
 			if py_response is not None:
-				bn_response = core.BNCreateDownloadInstanceResponse(len(py_response.headers))
-				bn_response.contents.statusCode = py_response.status_code
-				bn_response.contents.headerCount = len(py_response.headers)
+				# Assign to an instance variable so the memory stays live until the request is done
+				self.bn_response = core.BNDownloadInstanceResponse()
+				self.bn_response.statusCode = py_response.status_code
+				self.bn_response.headerCount = len(py_response.headers)
+				self.bn_response.headerKeys = (ctypes.c_char_p * len(py_response.headers))()
+				self.bn_response.headerValues = (ctypes.c_char_p * len(py_response.headers))()
 				for i, (key, value) in enumerate(py_response.headers.items()):
-					bn_response.contents.headerKeys[i] = pyNativeStr(key)
-					bn_response.contents.headerValues[i] = pyNativeStr(value)
+					self.bn_response.headerKeys[i] = core.BNAllocString(pyNativeStr(key))
+					self.bn_response.headerValues[i] = core.BNAllocString(pyNativeStr(value))
 
+				out_response[0] = ctypes.pointer(self.bn_response)
+			else:
+				out_response[0] = None
 			return 0 if py_response is not None else -1
 		except:
+			out_response[0] = None
 			log.log_error(traceback.format_exc())
 			return -1
 
 	def _free_response(self, ctxt, response):
-		core.BNFreeDownloadInstanceResponse(response)
+		del self.bn_response
 
 	@abc.abstractmethod
 	def perform_destroy_instance(self):
@@ -404,31 +413,28 @@ try:
 					proxies = None
 
 				r = requests.request(pyNativeStr(method), pyNativeStr(url), headers=headers, data=data, proxies=proxies)
-				if not r.ok:
-					core.BNSetErrorForDownloadInstance(self.handle, "Received error from server")
-					return -1
 				response = r.content
 				if len(response) == 0:
 					core.BNSetErrorForDownloadInstance(self.handle, "No data received from server!")
-					return -1
+					return None
 				raw_bytes = (ctypes.c_ubyte * len(response)).from_buffer_copy(response)
 				bytes_wrote = core.BNWriteDataForDownloadInstance(self.handle, raw_bytes, len(raw_bytes))
 				if bytes_wrote != len(raw_bytes):
 					core.BNSetErrorForDownloadInstance(self.handle, "Bytes written mismatch!")
-					return -1
+					return None
 				continue_download = core.BNNotifyProgressForDownloadInstance(self.handle, bytes_wrote, bytes_wrote)
 				if continue_download is False:
 					core.BNSetErrorForDownloadInstance(self.handle, "Download aborted!")
-					return -1
+					return None
+
+				return DownloadInstance.Response(r.status_code, r.headers, None)
 			except requests.RequestException as e:
 				core.BNSetErrorForDownloadInstance(self.handle, e.__class__.__name__)
-				return -1
+				return None
 			except:
 				core.BNSetErrorForDownloadInstance(self.handle, "Unknown Exception!")
 				log.log_error(traceback.format_exc())
-				return -1
-
-			return 0
+				return None
 
 	class PythonDownloadProvider(DownloadProvider):
 		name = "PythonDownloadProvider"
@@ -443,9 +449,9 @@ if not _loaded and (sys.platform != "win32") and (sys.version_info >= (2, 7, 9))
 	try:
 		try:
 			from urllib.request import urlopen, build_opener, install_opener, ProxyHandler, Request
-			from urllib.error import URLError
+			from urllib.error import URLError, HTTPError
 		except ImportError:
-			from urllib2 import urlopen, build_opener, install_opener, ProxyHandler, URLError, Request
+			from urllib2 import urlopen, build_opener, install_opener, ProxyHandler, URLError, HTTPError, Request
 
 		class PythonDownloadInstance(DownloadInstance):
 			def __init__(self, provider):
@@ -516,6 +522,7 @@ if not _loaded and (sys.platform != "win32") and (sys.version_info >= (2, 7, 9))
 					return Request.get_method(self, *args, **kwargs)
 
 			def perform_custom_request(self, method, url, headers, data):
+				result = None
 				try:
 					proxy_setting = Settings().get_string('downloadClient.httpsProxy')
 					if proxy_setting:
@@ -526,38 +533,40 @@ if not _loaded and (sys.platform != "win32") and (sys.version_info >= (2, 7, 9))
 						del headers[b"Content-Length"]
 
 					req = PythonDownloadInstance.CustomRequest(pyNativeStr(url), data=data, headers=headers, method=pyNativeStr(method))
-					r = urlopen(req)
-					total_size = int(r.headers.get('content-length', 0))
-					bytes_sent = 0
-					while True:
-						data = r.read(4096)
-						if not data:
-							break
-						raw_bytes = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
-						bytes_wrote = core.BNWriteDataForDownloadInstance(self.handle, raw_bytes, len(raw_bytes))
-						if bytes_wrote != len(raw_bytes):
-							core.BNSetErrorForDownloadInstance(self.handle, "Bytes written mismatch!")
-							return -1
-						bytes_sent = bytes_sent + bytes_wrote
-						continue_download = core.BNNotifyProgressForDownloadInstance(self.handle, bytes_sent, total_size)
-						if continue_download is False:
-							core.BNSetErrorForDownloadInstance(self.handle, "Download aborted!")
-							return -1
-
-					if not bytes_sent:
-						core.BNSetErrorForDownloadInstance(self.handle, "Received no data!")
-						return -1
-
+					result = urlopen(req)
+				except HTTPError as he:
+					result = he
 				except URLError as e:
 					core.BNSetErrorForDownloadInstance(self.handle, e.__class__.__name__)
 					log.log_error(str(e))
-					return -1
+					return None
 				except:
 					core.BNSetErrorForDownloadInstance(self.handle, "Unknown Exception!")
 					log.log_error(traceback.format_exc())
-					return -1
+					return None
 
-				return 0
+				total_size = int(result.headers.get('content-length', 0))
+				bytes_sent = 0
+				while True:
+					data = result.read(4096)
+					if not data:
+						break
+					raw_bytes = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
+					bytes_wrote = core.BNWriteDataForDownloadInstance(self.handle, raw_bytes, len(raw_bytes))
+					if bytes_wrote != len(raw_bytes):
+						core.BNSetErrorForDownloadInstance(self.handle, "Bytes written mismatch!")
+						return None
+					bytes_sent = bytes_sent + bytes_wrote
+					continue_download = core.BNNotifyProgressForDownloadInstance(self.handle, bytes_sent, total_size)
+					if continue_download is False:
+						core.BNSetErrorForDownloadInstance(self.handle, "Download aborted!")
+						return None
+
+				if not bytes_sent:
+					core.BNSetErrorForDownloadInstance(self.handle, "Received no data!")
+					return None
+
+				return DownloadInstance.Response(result.getcode(), result.headers, None)
 
 		class PythonDownloadProvider(DownloadProvider):
 			name = "PythonDownloadProvider"
