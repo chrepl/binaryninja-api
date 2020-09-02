@@ -11,6 +11,7 @@ DownloadInstance::DownloadInstance(DownloadProvider* provider)
 	cb.destroyInstance = DestroyInstanceCallback;
 	cb.performRequest = PerformRequestCallback;
 	cb.performCustomRequest = PerformCustomRequestCallback;
+	cb.freeResponse = PerformFreeResponse;
 	AddRefForRegistration();
 	m_object = BNInitDownloadInstance(provider->GetObject(), &cb);
 }
@@ -36,7 +37,7 @@ int DownloadInstance::PerformRequestCallback(void* ctxt, const char* url)
 }
 
 
-int DownloadInstance::PerformCustomRequestCallback(void* ctxt, const char* method, const char* url, uint64_t headerCount, const char* const* headerKeys, const char* const* headerValues)
+int DownloadInstance::PerformCustomRequestCallback(void* ctxt, const char* method, const char* url, uint64_t headerCount, const char* const* headerKeys, const char* const* headerValues, BNDownloadInstanceResponse** response)
 {
 	DownloadInstance* instance = (DownloadInstance*)ctxt;
 	unordered_map<string, string> headers;
@@ -44,7 +45,40 @@ int DownloadInstance::PerformCustomRequestCallback(void* ctxt, const char* metho
 		headers[headerKeys[i]] = headerValues[i];
 	}
 
-	return instance->PerformCustomRequest(method, url, headers);
+	Response apiResponse;
+	int status = instance->PerformCustomRequest(method, url, headers, apiResponse);
+
+	char** keys = new char*[apiResponse.headers.size()];
+	char** values = new char*[apiResponse.headers.size()];
+
+	uint64_t i = 0;
+	for (const auto& pair : apiResponse.headers) {
+		keys[i] = BNAllocString(pair.first.c_str());
+		values[i] = BNAllocString(pair.second.c_str());
+		i ++;
+	}
+
+	*response = new BNDownloadInstanceResponse;
+	(*response)->statusCode = apiResponse.statusCode;
+	(*response)->headerCount = apiResponse.headers.size();
+	(*response)->headerKeys = keys;
+	(*response)->headerValues = values;
+
+	return status;
+}
+
+
+void DownloadInstance::PerformFreeResponse(void* ctxt, BNDownloadInstanceResponse* response)
+{
+	for (uint64_t i = 0; i < response->headerCount; i ++) {
+		BNFreeString(response->headerKeys[i]);
+		BNFreeString(response->headerValues[i]);
+	}
+
+	delete [] response->headerKeys;
+	delete [] response->headerValues;
+
+	delete response;
 }
 
 
@@ -87,7 +121,7 @@ int DownloadInstance::PerformRequest(const string& url, BNDownloadInstanceOutput
 }
 
 
-int DownloadInstance::PerformCustomRequest(const string& method, const string& url, const std::unordered_map<std::string, std::string>& headers, BNDownloadInstanceInputOutputCallbacks* callbacks)
+int DownloadInstance::PerformCustomRequest(const string& method, const string& url, const std::unordered_map<std::string, std::string>& headers, Response& response, BNDownloadInstanceInputOutputCallbacks* callbacks)
 {
 	const char** headerKeys = new const char*[headers.size()];
 	const char** headerValues = new const char*[headers.size()];
@@ -99,7 +133,16 @@ int DownloadInstance::PerformCustomRequest(const string& method, const string& u
 		i ++;
 	}
 
-	int result = BNPerformCustomRequest(m_object, method.c_str(), url.c_str(), headers.size(), headerKeys, headerValues, callbacks);
+	BNDownloadInstanceResponse* bnResponse;
+
+	int result = BNPerformCustomRequest(m_object, method.c_str(), url.c_str(), headers.size(), headerKeys, headerValues, &bnResponse, callbacks);
+
+	response.statusCode = bnResponse->statusCode;
+	for (uint64_t i = 0; i < bnResponse->headerCount; i ++) {
+		response.headers[bnResponse->headerKeys[i]] = bnResponse->headerValues[i];
+	}
+
+	BNFreeDownloadInstanceResponse(bnResponse);
 
 	delete [] headerKeys;
 	delete [] headerValues;
@@ -126,11 +169,12 @@ int CoreDownloadInstance::PerformRequest(const std::string& url)
 }
 
 
-int CoreDownloadInstance::PerformCustomRequest(const std::string& method, const std::string& url, const std::unordered_map<std::string, std::string>& headers)
+int CoreDownloadInstance::PerformCustomRequest(const std::string& method, const std::string& url, const std::unordered_map<std::string, std::string>& headers, Response& response)
 {
 	(void)method;
 	(void)url;
 	(void)headers;
+	response.statusCode = -1;
 	return -1;
 }
 

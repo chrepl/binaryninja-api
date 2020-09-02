@@ -56,6 +56,13 @@ class DownloadInstance(object):
 	_registered_instances = []
 	_response = b""
 	_data = b""
+
+	class Response:
+		def __init__(self, status_code, headers, content):
+			self.status_code = status_code
+			self.headers = headers
+			self.content = content
+
 	def __init__(self, provider, handle = None):
 		if handle is None:
 			self._cb = core.BNDownloadInstanceCallbacks()
@@ -63,6 +70,7 @@ class DownloadInstance(object):
 			self._cb.destroyInstance = self._cb.destroyInstance.__class__(self._destroy_instance)
 			self._cb.performRequest = self._cb.performRequest.__class__(self._perform_request)
 			self._cb.performCustomRequest = self._cb.performCustomRequest.__class__(self._perform_custom_request)
+			self._cb.freeResponse = self._cb.freeResponse.__class__(self._free_response)
 			self.handle = core.BNInitDownloadInstance(provider.handle, self._cb)
 			self.__class__._registered_instances.append(self)
 		else:
@@ -88,7 +96,7 @@ class DownloadInstance(object):
 			log.log_error(traceback.format_exc())
 			return -1
 
-	def _perform_custom_request(self, ctxt, method, url, header_count, header_keys, header_values):
+	def _perform_custom_request(self, ctxt, method, url, header_count, header_keys, header_values, response):
 		try:
 			# Extract headers
 			keys_ptr = ctypes.cast(header_keys, ctypes.POINTER(ctypes.c_char_p))
@@ -108,10 +116,23 @@ class DownloadInstance(object):
 					break
 				data += read_buffer[:read_len]
 
-			return self.perform_custom_request(method, url, headers, data)
+			py_response = self.perform_custom_request(method, url, headers, data)
+
+			if py_response is not None:
+				bn_response = core.BNCreateDownloadInstanceResponse(len(py_response.headers))
+				bn_response.contents.statusCode = py_response.status_code
+				bn_response.contents.headerCount = len(py_response.headers)
+				for i, (key, value) in enumerate(py_response.headers.items()):
+					bn_response.contents.headerKeys[i] = pyNativeStr(key)
+					bn_response.contents.headerValues[i] = pyNativeStr(value)
+
+			return 0 if py_response is not None else -1
 		except:
 			log.log_error(traceback.format_exc())
 			return -1
+
+	def _free_response(self, ctxt, response):
+		core.BNFreeDownloadInstanceResponse(response)
 
 	@abc.abstractmethod
 	def perform_destroy_instance(self):
@@ -159,7 +180,7 @@ class DownloadInstance(object):
 		result = core.BNPerformDownloadRequest(self.handle, url, callbacks)
 		return (result, self._response)
 
-	def request(self, method, url, headers = None, data = None, json = None):
+	def request(self, method, url, headers=None, data=None, json=None):
 		if headers is None:
 			headers = {}
 		if data is None and json is None:
@@ -178,7 +199,6 @@ class DownloadInstance(object):
 				assert(type(data) == bytes)
 
 		self._data = data
-		print(self._data)
 		if len(data) > 0 and "Content-Length" not in headers:
 			headers["Content-Length"] = len(data)
 		if "Content-Type" not in headers:
@@ -198,16 +218,25 @@ class DownloadInstance(object):
 			header_keys[i] = to_bytes(key)
 			header_values[i] = to_bytes(value)
 
-		result = core.BNPerformCustomRequest(self.handle, method, url, len(headers), header_keys, header_values, callbacks)
-		return (result, self._response)
+		response = ctypes.POINTER(core.BNDownloadInstanceResponse)()
+		result = core.BNPerformCustomRequest(self.handle, method, url, len(headers), header_keys, header_values, response, callbacks)
 
-	def get(self, url, headers = None):
+		if result != 0:
+			return None
+
+		response_headers = {}
+		for i in range(response.contents.headerCount):
+			response_headers[response.contents.headerKeys[i]] = response.contents.headerValues[i]
+
+		return DownloadInstance.Response(response.contents.statusCode, response_headers, self._response)
+
+	def get(self, url, headers=None):
 		return self.request("GET", url, headers)
 
-	def post(self, url, headers = None, data = None, json = None):
+	def post(self, url, headers=None, data=None, json=None):
 		return self.request("POST", url, headers, data, json)
 
-	def put(self, url, headers = None, data = None, json = None):
+	def put(self, url, headers=None, data=None, json=None):
 		return self.request("POST", url, headers, data, json)
 
 class _DownloadProviderMetaclass(type):

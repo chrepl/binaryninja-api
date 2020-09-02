@@ -4735,16 +4735,23 @@ __attribute__ ((format (printf, 1, 2)))
 
 		static void DestroyInstanceCallback(void* ctxt);
 		static int PerformRequestCallback(void* ctxt, const char* url);
-		static int PerformCustomRequestCallback(void* ctxt, const char* method, const char* url, uint64_t headerCount, const char* const* headerKeys, const char* const* headerValues);
+		static int PerformCustomRequestCallback(void* ctxt, const char* method, const char* url, uint64_t headerCount, const char* const* headerKeys, const char* const* headerValues, BNDownloadInstanceResponse** response);
+		static void PerformFreeResponse(void* ctxt, BNDownloadInstanceResponse* response);
 
 		virtual void DestroyInstance();
 
 	public:
+		struct Response
+		{
+			uint16_t statusCode;
+			std::unordered_map<std::string, std::string> headers;
+		};
+
 		virtual int PerformRequest(const std::string& url) = 0;
-		virtual int PerformCustomRequest(const std::string& method, const std::string& url, const std::unordered_map<std::string, std::string>& headers) = 0;
+		virtual int PerformCustomRequest(const std::string& method, const std::string& url, const std::unordered_map<std::string, std::string>& headers, Response& response) = 0;
 
 		int PerformRequest(const std::string& url, BNDownloadInstanceOutputCallbacks* callbacks);
-		int PerformCustomRequest(const std::string& method, const std::string& url, const std::unordered_map<std::string, std::string>& headers, BNDownloadInstanceInputOutputCallbacks* callbacks);
+		int PerformCustomRequest(const std::string& method, const std::string& url, const std::unordered_map<std::string, std::string>& headers, Response& response, BNDownloadInstanceInputOutputCallbacks* callbacks);
 		uint64_t ReadDataCallback(uint8_t* data, uint64_t len);
 		uint64_t WriteDataCallback(uint8_t* data, uint64_t len);
 		bool NotifyProgressCallback(uint64_t progress, uint64_t total);
@@ -4759,7 +4766,7 @@ __attribute__ ((format (printf, 1, 2)))
 		virtual ~CoreDownloadInstance() {};
 
 		virtual int PerformRequest(const std::string& url) override;
-		virtual int PerformCustomRequest(const std::string& method, const std::string& url, const std::unordered_map<std::string, std::string>& headers) override;
+		virtual int PerformCustomRequest(const std::string& method, const std::string& url, const std::unordered_map<std::string, std::string>& headers, DownloadInstance::Response& response) override;
 	};
 
 	class DownloadProvider: public StaticCoreRefCountObject<BNDownloadProvider>
